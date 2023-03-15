@@ -3,13 +3,34 @@ name = "wasm-utils"
 version = "0.16.0"
 edition = "2021"
 
+[[bin]]
+name = "wasm-ext"
+path = "cli/ext.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "wasm-gas"
+path = "cli/gas.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "wasm-stack-height"
+path = "cli/stack_height.rs"
+required-features = ["cli"]
+
 [dependencies]
 byteorder = "1"
 log = "0.4"
 parity-wasm = "0.41.0"
+# CLI dependencies
+env_logger = { version = "0.10", optional = true }
 
 [dev-dependencies]
 binaryen = "0.8"
 indoc = "0.3"
 rand = "0.7"
 wabt = "0.10"
+pretty_assertions = "1"
+
+[features]
+cli = ["env_logger"]

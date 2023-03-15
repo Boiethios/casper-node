@@ -338,7 +338,8 @@ fn validate_metering_injections(
 }
 
 mod tests {
-    use super::{super::determine_metered_blocks, *};
+    use super::*;
+    use crate::gas::determine_metered_blocks;
     use binaryen::tools::translate_to_fuzz_mvp;
     use parity_wasm::elements;
     use rand::{thread_rng, RngCore};
