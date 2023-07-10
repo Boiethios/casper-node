@@ -1123,7 +1123,7 @@ impl reactor::Reactor for MainReactor {
             validator_matrix.clone(),
             registry,
         )?;
-        let block_validator = BlockValidator::new(Arc::clone(&chainspec));
+        let block_validator = BlockValidator::new(Arc::clone(&chainspec), validator_matrix.clone());
         let upgrade_watcher =
             UpgradeWatcher::new(chainspec.as_ref(), config.upgrade_watcher, &root_dir)?;
         let deploy_acceptor = DeployAcceptor::new(chainspec.as_ref(), registry)?;

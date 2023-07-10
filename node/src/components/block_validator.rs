@@ -23,7 +23,7 @@ use itertools::Itertools;
 use smallvec::{smallvec, SmallVec};
 use tracing::{info, warn};
 
-use casper_types::Timestamp;
+use casper_types::{EraId, Timestamp};
 
 use crate::{
     components::{
@@ -36,8 +36,9 @@ use crate::{
         EffectBuilder, EffectExt, Effects, Responder,
     },
     types::{
-        appendable_block::AppendableBlock, Approval, Chainspec, Deploy, DeployFootprint,
-        DeployHash, DeployHashWithApprovals, DeployOrTransferHash, LegacyDeploy, NodeId,
+        appendable_block::AppendableBlock, Approval, BlockWithMetadata, Chainspec, Deploy,
+        DeployFootprint, DeployHash, DeployHashWithApprovals, DeployOrTransferHash, LegacyDeploy,
+        NodeId, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -84,6 +85,15 @@ pub(crate) enum Event {
     #[from]
     Request(BlockValidationRequest),
 
+    ///TODO
+    #[display(fmt = "{:?} read from storage", past_blocks_with_metadata)]
+    GotPastBlockWithMetadata {
+        past_blocks_with_metadata: Vec<Option<BlockWithMetadata>>,
+        proposed_block_era_id: EraId,
+        proposed_block_height: u64,
+        proposed_block: ProposedBlock<ClContext>,
+    },
+
     /// A deploy has been successfully found.
     #[display(fmt = "{} found", dt_hash)]
     DeployFound {
@@ -112,6 +122,7 @@ pub(crate) struct BlockValidationState {
     missing_deploys: HashMap<DeployOrTransferHash, BTreeSet<Approval>>,
     /// A list of responders that are awaiting an answer.
     responders: SmallVec<[Responder<bool>; 2]>,
+    // /// TODO
 }
 
 impl BlockValidationState {
@@ -128,6 +139,8 @@ pub(crate) struct BlockValidator {
     /// Chainspec loaded for deploy validation.
     #[data_size(skip)]
     chainspec: Arc<Chainspec>,
+    #[data_size(skip)]
+    validator_matrix: ValidatorMatrix,
     /// State of validation of a specific block.
     validation_states: HashMap<ProposedBlock<ClContext>, BlockValidationState>,
     /// Number of requests for a specific deploy hash still in flight.
@@ -136,9 +149,10 @@ pub(crate) struct BlockValidator {
 
 impl BlockValidator {
     /// Creates a new block validator instance.
-    pub(crate) fn new(chainspec: Arc<Chainspec>) -> Self {
+    pub(crate) fn new(chainspec: Arc<Chainspec>, validator_matrix: ValidatorMatrix) -> Self {
         BlockValidator {
             chainspec,
+            validator_matrix,
             validation_states: HashMap::new(),
             in_flight: KeyedCounter::default(),
         }
@@ -161,6 +175,30 @@ impl BlockValidator {
             "received invalid block containing duplicated deploys"
         );
     }
+
+    fn handle_got_past_block_with_metadata<REv>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        past_blocks_with_metadata: Vec<Option<BlockWithMetadata>>,
+        proposed_block_era_id: EraId,
+        proposed_block_height: u64,
+        proposed_block: ProposedBlock<ClContext>,
+    ) -> Effects<Event> {
+        let mut era_ids: BTreeSet<_> = past_blocks_with_metadata
+            .into_iter()
+            .flatten()
+            .map(|metadata| metadata.block.header().era_id())
+            .collect();
+
+        if !proposed_block.context().ancestor_values().is_empty() {
+            era_ids.insert(proposed_block_era_id);
+        }
+        todo!()
+        //let validator_keys: Option<BTreeSet<_>> = self
+        //    .validator_matrix
+        //    .validator_weights(todo!())
+        //    .map(|weights| weights.into_validator_public_keys().collect());
+    }
 }
 
 impl<REv> Component<REv> for BlockValidator
@@ -182,6 +220,8 @@ where
         let mut effects = Effects::new();
         match event {
             Event::Request(BlockValidationRequest {
+                proposed_block_era_id,
+                proposed_block_height,
                 block,
                 sender,
                 responder,
@@ -211,17 +251,17 @@ where
                 }
 
                 let block_timestamp = block.timestamp();
-                let state = self
-                    .validation_states
-                    .entry(block)
-                    .or_insert(BlockValidationState {
-                        appendable_block: AppendableBlock::new(
-                            self.chainspec.deploy_config,
-                            block_timestamp,
-                        ),
-                        missing_deploys: block_deploys.clone(),
-                        responders: smallvec![],
-                    });
+                let state =
+                    self.validation_states
+                        .entry(block.clone())
+                        .or_insert(BlockValidationState {
+                            appendable_block: AppendableBlock::new(
+                                self.chainspec.deploy_config,
+                                block_timestamp,
+                            ),
+                            missing_deploys: block_deploys.clone(),
+                            responders: smallvec![],
+                        });
 
                 if state.missing_deploys.is_empty() {
                     // Block has already been validated successfully, early return to caller.
@@ -237,6 +277,41 @@ where
                     // ...then request it.
                     fetch_deploy(effect_builder, dt_hash, sender)
                 }));
+
+                let signature_rewards_max_delay =
+                    self.chainspec.core_config.signature_rewards_max_delay;
+                let minimum_block_height =
+                    proposed_block_height.saturating_sub(signature_rewards_max_delay);
+
+                effects.extend(
+                    effect_builder
+                        .collect_past_blocks_with_metadata(
+                            minimum_block_height..proposed_block_height,
+                            false,
+                        )
+                        .event(
+                            move |past_blocks_with_metadata| Event::GotPastBlockWithMetadata {
+                                past_blocks_with_metadata,
+                                proposed_block_era_id,
+                                proposed_block_height,
+                                proposed_block: block,
+                            },
+                        ),
+                );
+            }
+            Event::GotPastBlockWithMetadata {
+                past_blocks_with_metadata,
+                proposed_block_era_id,
+                proposed_block_height,
+                proposed_block,
+            } => {
+                effects.extend(self.handle_got_past_block_with_metadata(
+                    effect_builder,
+                    past_blocks_with_metadata,
+                    proposed_block_era_id,
+                    proposed_block_height,
+                    proposed_block,
+                ));
             }
             Event::DeployFound {
                 dt_hash,
