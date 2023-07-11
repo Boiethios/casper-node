@@ -200,24 +200,19 @@ impl BlockValidator {
         // blocks in the past relative to the current block, minus 1 (ie., 0 is the previous block,
         // 1 is the one before that, etc.) - these indices will correspond directly to the indices
         // in RewardedSignatures
-        let era_ids_map: BTreeMap<_, _> = proposed_block
-            .context()
-            .ancestor_values()
-            .iter()
-            .enumerate()
-            .map(|(i, _value)| (i, proposed_block_era_id))
+        let era_ids_vec: Vec<_> = std::iter::repeat(proposed_block_era_id)
+            .take(num_ancestor_values)
             .chain(
                 past_blocks_with_metadata
                     .into_iter()
-                    .flatten()
                     .rev()
-                    .enumerate()
                     .skip(num_ancestor_values)
-                    .map(|(i, metadata)| (i, metadata.block.header().era_id())),
+                    .flatten()
+                    .map(|metadata| metadata.block.header().era_id()),
             )
             .collect();
 
-        let era_ids: BTreeSet<_> = era_ids_map.values().copied().collect();
+        let era_ids: BTreeSet<_> = era_ids_vec.iter().copied().collect();
 
         let validators: BTreeMap<_, BTreeSet<_>> = era_ids
             .into_iter()
@@ -234,10 +229,9 @@ impl BlockValidator {
             .value()
             .rewarded_signatures()
             .iter()
+            .zip(era_ids_vec)
             .enumerate()
-            .map(|(i, single_block_rewarded_sigs)| {
-                let era_id = era_ids_map[&i]; // safe, as we ensured that we have era ids for all
-                                              // blocks
+            .map(|(i, (single_block_rewarded_sigs, era_id))| {
                 let all_validators = validators.get(&era_id).unwrap(); // TODO: don't unwrap
                 (
                     proposed_block_height
