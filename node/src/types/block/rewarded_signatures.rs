@@ -217,6 +217,11 @@ impl RewardedSignatures {
                 .collect(),
         )
     }
+
+    /// Iterates over the `SingleBlockRewardedSignatures` for each rewarded block.
+    pub fn iter(&self) -> impl Iterator<Item = &SingleBlockRewardedSignatures> {
+        self.0.iter()
+    }
 }
 
 impl ToBytes for RewardedSignatures {

@@ -176,7 +176,7 @@ impl BlockValidator {
         );
     }
 
-    fn handle_got_past_block_with_metadata<REv>(
+    fn handle_got_past_blocks_with_metadata<REv>(
         &mut self,
         effect_builder: EffectBuilder<REv>,
         past_blocks_with_metadata: Vec<Option<BlockWithMetadata>>,
@@ -184,15 +184,72 @@ impl BlockValidator {
         proposed_block_height: u64,
         proposed_block: ProposedBlock<ClContext>,
     ) -> Effects<Event> {
-        let mut era_ids: BTreeSet<_> = past_blocks_with_metadata
-            .into_iter()
-            .flatten()
-            .map(|metadata| metadata.block.header().era_id())
+        let num_ancestor_values = proposed_block.context().ancestor_values().len();
+
+        if past_blocks_with_metadata
+            .iter()
+            .rev()
+            .skip(num_ancestor_values)
+            .any(|maybe_block| maybe_block.is_none())
+        {
+            // TODO: we _need_ those blocks to validate the new one - fetch them, or something?
+            return Effects::new();
+        }
+
+        // This will create a map of relative_height → era_id - relative_height being the number of
+        // blocks in the past relative to the current block, minus 1 (ie., 0 is the previous block,
+        // 1 is the one before that, etc.) - these indices will correspond directly to the indices
+        // in RewardedSignatures
+        let era_ids_map: BTreeMap<_, _> = proposed_block
+            .context()
+            .ancestor_values()
+            .iter()
+            .enumerate()
+            .map(|(i, _value)| (i, proposed_block_era_id))
+            .chain(
+                past_blocks_with_metadata
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .enumerate()
+                    .skip(num_ancestor_values)
+                    .map(|(i, metadata)| (i, metadata.block.header().era_id())),
+            )
             .collect();
 
-        if !proposed_block.context().ancestor_values().is_empty() {
-            era_ids.insert(proposed_block_era_id);
-        }
+        let era_ids: BTreeSet<_> = era_ids_map.values().copied().collect();
+
+        let validators: BTreeMap<_, BTreeSet<_>> = era_ids
+            .into_iter()
+            .filter_map(|era_id| {
+                self.validator_matrix
+                    .validator_weights(era_id)
+                    .map(|weights| (era_id, weights.into_validator_public_keys().collect()))
+            })
+            .collect();
+
+        // This will be a map from block height to the set of public keys of the validators who are
+        // supposed to have signed that block.
+        let included_sigs: BTreeMap<_, _> = proposed_block
+            .value()
+            .rewarded_signatures()
+            .iter()
+            .enumerate()
+            .map(|(i, single_block_rewarded_sigs)| {
+                let era_id = era_ids_map[&i]; // safe, as we ensured that we have era ids for all
+                                              // blocks
+                let all_validators = validators.get(&era_id).unwrap(); // TODO: don't unwrap
+                (
+                    proposed_block_height
+                        .saturating_sub(i as u64)
+                        .saturating_sub(1),
+                    single_block_rewarded_sigs
+                        .clone()
+                        .into_validator_set(all_validators.into_iter().cloned()),
+                )
+            })
+            .collect();
+
         todo!()
         //let validator_keys: Option<BTreeSet<_>> = self
         //    .validator_matrix
@@ -305,7 +362,7 @@ where
                 proposed_block_height,
                 proposed_block,
             } => {
-                effects.extend(self.handle_got_past_block_with_metadata(
+                effects.extend(self.handle_got_past_blocks_with_metadata(
                     effect_builder,
                     past_blocks_with_metadata,
                     proposed_block_era_id,
