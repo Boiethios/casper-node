@@ -1966,7 +1966,7 @@ async fn run_rewards_network_scenario(
                     Some(switch_block.height() - switch_blocks.headers[i - 2].height())
                 };
                 let total_expected_pot = Ratio::from(
-                    recomputed_total_supply[&(previous_switch_block_height as usize)]
+                    recomputed_total_supply[&(i - 1)]
                         * fixture.chainspec.core_config.minimum_era_height,
                 ) * fixture.chainspec.core_config.round_seigniorage_rate;
                 let total_previous_expected_pot = if switch_blocks.headers[i - 1].is_genesis() {
@@ -1974,8 +1974,7 @@ async fn run_rewards_network_scenario(
                 } else {
                     Some(
                         Ratio::from(
-                            recomputed_total_supply
-                                [&(switch_blocks.headers[i - 2].height() as usize)]
+                            recomputed_total_supply[&(i - 2)]
                                 * fixture.chainspec.core_config.minimum_era_height,
                         ) * fixture.chainspec.core_config.round_seigniorage_rate,
                     )
@@ -2154,6 +2153,29 @@ async fn run_rewards_network_scenario(
             )
         }
     })
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_eras() {
+    run_rewards_network_scenario(
+        [STAKE, STAKE, STAKE, STAKE, STAKE],
+        5,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        &[],
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_HALF.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_HALF.into(),
+            ..Default::default()
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
