@@ -95,6 +95,7 @@ struct ChainspecOverride {
     consensus_protocol: ConsensusProtocolName,
     finders_fee: Ratio<u64>,
     finality_signature_proportion: Ratio<u64>,
+    signature_rewards_max_delay: u64,
 }
 
 impl Default for ChainspecOverride {
@@ -108,6 +109,7 @@ impl Default for ChainspecOverride {
             consensus_protocol: ConsensusProtocolName::Zug,
             finders_fee: Ratio::new(1, 4),
             finality_signature_proportion: Ratio::new(1, 3),
+            signature_rewards_max_delay: 5,
         }
     }
 }
@@ -211,6 +213,7 @@ impl TestFixture {
             consensus_protocol,
             finders_fee,
             finality_signature_proportion,
+            signature_rewards_max_delay,
         } = spec_override.unwrap_or_default();
         if era_duration != TimeDiff::from_millis(0) {
             chainspec.core_config.era_duration = era_duration;
@@ -224,6 +227,7 @@ impl TestFixture {
         chainspec.core_config.finality_signature_proportion = finality_signature_proportion;
         chainspec.highway_config.maximum_round_length =
             chainspec.core_config.minimum_block_time * 2;
+        chainspec.core_config.signature_rewards_max_delay = signature_rewards_max_delay;
 
         let mut fixture = TestFixture {
             rng,
@@ -1780,6 +1784,7 @@ const FINALITY_SIG_PROP_ZERO: (u64, u64) = (0u64, 1u64);
 const FINALITY_SIG_PROP_HALF: (u64, u64) = (1u64, 2u64);
 const FINALITY_SIG_PROP_ONE: (u64, u64) = (1u64, 1u64);
 const FILTERED_NODES_INDICES: &'static [usize] = &[3, 4];
+const FINALITY_SIG_LOOKBACK: u64 = 3;
 
 async fn run_rewards_network_scenario(
     initial_stakes: impl Into<Vec<u128>>,
@@ -2147,8 +2152,9 @@ async fn run_reward_network_zug_no_finality_small_nominal_five_eras() {
             minimum_era_height: MIN_HEIGHT,
             minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
             round_seigniorage_rate: SEIGNIORAGE.into(),
-            finders_fee: FINDERS_FEE_HALF.into(),
-            finality_signature_proportion: FINALITY_SIG_PROP_HALF.into(),
+            finders_fee: FINDERS_FEE_ZERO.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_ZERO.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
             ..Default::default()
         },
     )
@@ -2172,6 +2178,55 @@ async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_er
             round_seigniorage_rate: SEIGNIORAGE.into(),
             finders_fee: FINDERS_FEE_HALF.into(),
             finality_signature_proportion: FINALITY_SIG_PROP_HALF.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_eras_no_lookback() {
+    run_rewards_network_scenario(
+        [STAKE, STAKE, STAKE, STAKE, STAKE],
+        5,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        &[],
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_HALF.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_HALF.into(),
+            signature_rewards_max_delay: 0,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_all_finality_half_finders_small_nominal_five_eras_no_lookback() {
+    run_rewards_network_scenario(
+        [STAKE, STAKE, STAKE, STAKE, STAKE],
+        5,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        &[],
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_HALF.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: 0,
             ..Default::default()
         },
     )
@@ -2197,6 +2252,7 @@ async fn run_reward_network_zug_all_finality_half_finders() {
             round_seigniorage_rate: SEIGNIORAGE.into(),
             finders_fee: FINDERS_FEE_HALF.into(),
             finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
             ..Default::default()
         },
     )
@@ -2222,6 +2278,7 @@ async fn run_reward_network_zug_all_finality_zero_finders() {
             round_seigniorage_rate: SEIGNIORAGE.into(),
             finders_fee: FINDERS_FEE_ZERO.into(),
             finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
             ..Default::default()
         },
     )
@@ -2247,6 +2304,7 @@ async fn run_reward_network_highway_all_finality_zero_finders() {
             round_seigniorage_rate: SEIGNIORAGE.into(),
             finders_fee: FINDERS_FEE_ZERO.into(),
             finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
             ..Default::default()
         },
     )
@@ -2272,6 +2330,7 @@ async fn run_reward_network_highway_no_finality() {
             round_seigniorage_rate: SEIGNIORAGE.into(),
             finders_fee: FINDERS_FEE_ZERO.into(),
             finality_signature_proportion: FINALITY_SIG_PROP_ZERO.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
             ..Default::default()
         },
     )
