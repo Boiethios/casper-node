@@ -6,7 +6,6 @@ use std::{collections::BTreeMap, ops::Range, sync::Arc};
 use casper_execution_engine::engine_state::{self, GetEraValidatorsError};
 use futures::stream::{self, StreamExt as _, TryStreamExt as _};
 use num_rational::Ratio;
-use num_traits::{CheckedAdd, CheckedMul};
 
 use crate::{
     contract_runtime::EraValidatorsRequest,
@@ -64,7 +63,7 @@ pub enum RewardsError {
     /// We didn't have a required switch block.
     MissingSwitchBlock(EraId),
     /// We got an overflow while computing something.
-    ArithmeticOverflow,
+    ArithmeticError(ArithmeticError),
 
     FailedToFetchBlockWithHeight(u64),
     FailedToFetchEra(GetEraValidatorsError),
@@ -346,26 +345,20 @@ pub(crate) fn rewards_for_era(
     current_era_id: EraId,
     core_config: &CoreConfig,
 ) -> Result<BTreeMap<PublicKey, U512>, RewardsError> {
-    fn to_ratio_u512(ratio: Ratio<u64>) -> Ratio<U512> {
-        Ratio::new(U512::from(*ratio.numer()), U512::from(*ratio.denom()))
-    }
-
     let mut full_reward_for_validators: BTreeMap<_, _> = rewards_info
         .validator_keys(current_era_id)?
         .map(|key| (key, Ratio::new(U512::zero(), U512::one())))
         .collect();
 
     let mut increase_value_for_key =
-        |key: PublicKey, value: Ratio<U512>| -> Result<(), RewardsError> {
+        |key: PublicKey, value: MaybeNum<Ratio<U512>>| -> Result<(), RewardsError> {
             match full_reward_for_validators.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(value);
+                    entry.insert(value.get()?);
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let new_value = (*entry.get())
-                        .checked_add(&value)
-                        .ok_or(RewardsError::ArithmeticOverflow)?;
-                    *entry.get_mut() = new_value;
+                    let new_value = value + *entry.get();
+                    *entry.get_mut() = new_value.get()?;
                 }
             }
 
@@ -376,13 +369,12 @@ pub(crate) fn rewards_for_era(
     // because there is no block producer, and no previous blocks whose
     // signatures are to be rewarded:
     if current_era_id.is_genesis() == false {
-        let collection_proportion = to_ratio_u512(core_config.collection_rewards_proportion());
-        let contribution_proportion = to_ratio_u512(core_config.contribution_rewards_proportion());
+        let collection_proportion = MaybeNum::from(core_config.collection_rewards_proportion());
+        let contribution_proportion = MaybeNum::from(core_config.contribution_rewards_proportion());
 
         // Reward for producing a block from this era:
-        let production_reward = to_ratio_u512(core_config.production_rewards_proportion())
-            .checked_mul(&rewards_info.reward(current_era_id)?)
-            .ok_or(RewardsError::ArithmeticOverflow)?;
+        let production_reward = MaybeNum::from(core_config.production_rewards_proportion())
+            * rewards_info.reward(current_era_id)?;
 
         // Collect all rewards as a ratio:
         for block in rewards_info.blocks_from_era(current_era_id) {
@@ -402,20 +394,14 @@ pub(crate) fn rewards_for_era(
 
                 for signing_validator in validators_providing_signature {
                     // Reward for contributing to the finality signature, ie signing this block:
-                    let contribution_reward = rewards_info
-                        .weight_ratio(signed_block_era, &signing_validator)?
-                        .checked_mul(&contribution_proportion)
-                        .ok_or(RewardsError::ArithmeticOverflow)?
-                        .checked_mul(&rewards_info.reward(signed_block_era)?)
-                        .ok_or(RewardsError::ArithmeticOverflow)?;
+                    let contribution_reward = contribution_proportion
+                        * rewards_info.weight_ratio(signed_block_era, &signing_validator)?
+                        * rewards_info.reward(signed_block_era)?;
                     // Reward for gathering this signature. It is both weighted by the block
                     // producing/signature collecting validator, and the signing validator:
-                    let collection_reward = rewards_info
-                        .weight_ratio(signed_block_era, &signing_validator)?
-                        .checked_mul(&collection_proportion)
-                        .ok_or(RewardsError::ArithmeticOverflow)?
-                        .checked_mul(&rewards_info.reward(signed_block_era)?)
-                        .ok_or(RewardsError::ArithmeticOverflow)?;
+                    let collection_reward = collection_proportion
+                        * rewards_info.weight_ratio(signed_block_era, &signing_validator)?
+                        * rewards_info.reward(signed_block_era)?;
 
                     increase_value_for_key(signing_validator, contribution_reward)?;
                     increase_value_for_key(block.proposer.clone(), collection_reward)?;
@@ -470,6 +456,12 @@ async fn collect_past_blocks_batched<REv: From<StorageRequest>>(
         .await
 }
 
+impl From<ArithmeticError> for RewardsError {
+    fn from(value: ArithmeticError) -> Self {
+        Self::ArithmeticError(value)
+    }
+}
+
 impl From<Block> for CitedBlock {
     fn from(block: Block) -> Self {
         Self {
@@ -495,6 +487,90 @@ impl From<ExecutableBlock> for CitedBlock {
             is_switch_block: block.era_report.is_some(),
             // When the executable block is genesis, it's a different path:
             is_genesis: false,
+        }
+    }
+}
+
+use fallible_num::{ArithmeticError, MaybeNum};
+mod fallible_num {
+    use casper_types::U512;
+    use num_rational::Ratio;
+    use num_traits::{CheckedAdd, CheckedMul};
+    use std::ops;
+
+    #[derive(Debug, Copy, Clone)]
+    pub enum ArithmeticError {
+        Overflow,
+    }
+
+    #[derive(Debug, Copy, Clone)]
+    pub enum MaybeNum<N> {
+        Num(N),
+        Error(ArithmeticError),
+    }
+
+    impl<N> MaybeNum<N> {
+        pub fn get(self) -> Result<N, ArithmeticError> {
+            match self {
+                MaybeNum::Num(n) => Ok(n),
+                MaybeNum::Error(e) => Err(e),
+            }
+        }
+    }
+
+    impl<N> From<N> for MaybeNum<N> {
+        fn from(n: N) -> MaybeNum<N> {
+            MaybeNum::Num(n)
+        }
+    }
+
+    impl From<Ratio<u64>> for MaybeNum<Ratio<U512>> {
+        fn from(ratio: Ratio<u64>) -> Self {
+            MaybeNum::Num(Ratio::new(
+                U512::from(*ratio.numer()),
+                U512::from(*ratio.denom()),
+            ))
+        }
+    }
+
+    impl<N> ops::Mul<N> for MaybeNum<Ratio<U512>>
+    where
+        N: Into<MaybeNum<Ratio<U512>>>,
+    {
+        type Output = Self;
+
+        fn mul(self, rhs: N) -> Self::Output {
+            match nums(self, rhs.into()) {
+                Ok((a, b)) => match a.checked_mul(&b) {
+                    Some(ans) => MaybeNum::Num(ans),
+                    None => MaybeNum::Error(ArithmeticError::Overflow),
+                },
+                Err(e) => MaybeNum::Error(e),
+            }
+        }
+    }
+
+    impl<N> ops::Add<N> for MaybeNum<Ratio<U512>>
+    where
+        N: Into<MaybeNum<Ratio<U512>>>,
+    {
+        type Output = Self;
+
+        fn add(self, rhs: N) -> Self::Output {
+            match nums(self, rhs.into()) {
+                Ok((a, b)) => match a.checked_add(&b) {
+                    Some(ans) => MaybeNum::Num(ans),
+                    None => MaybeNum::Error(ArithmeticError::Overflow),
+                },
+                Err(e) => MaybeNum::Error(e),
+            }
+        }
+    }
+
+    fn nums<A, B>(a: MaybeNum<A>, b: MaybeNum<B>) -> Result<(A, B), ArithmeticError> {
+        match (a, b) {
+            (MaybeNum::Num(a), MaybeNum::Num(b)) => Ok((a, b)),
+            (MaybeNum::Error(e), _) | (_, MaybeNum::Error(e)) => Err(e),
         }
     }
 }
