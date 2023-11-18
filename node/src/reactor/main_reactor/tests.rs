@@ -2037,7 +2037,7 @@ async fn run_rewards_network_scenario(
                                         (Ratio::new(1, 1)
                                             - fixture.chainspec.core_config.finders_fee)
                                             * contributor_proportion
-                                            * signatures_reward,
+                                            * previous_signatures_reward.unwrap(),
                                         &mut recomputed_era_rewards,
                                         i,
                                         &mut recomputed_total_supply,
@@ -2241,6 +2241,32 @@ async fn run_reward_network_zug_all_finality_half_finders() {
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
         ],
         ERA_COUNT,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        FILTERED_NODES_INDICES,
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_HALF.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_all_finality_half_finders_five_eras() {
+    run_rewards_network_scenario(
+        [
+            STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
+        ],
+        5,
         TIME_OUT,
         REPRESENTATIVE_NODE_INDEX,
         FILTERED_NODES_INDICES,
