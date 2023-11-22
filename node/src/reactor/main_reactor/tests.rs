@@ -1767,6 +1767,7 @@ async fn rewards_are_calculated() {
 const VALIDATOR_SLOTS: u32 = 10;
 const NETWORK_SIZE: u64 = 10;
 const STAKE: u128 = 1000000000;
+const PRIME_STAKES: [u128; 5] = [106907, 106921, 106937, 106949, 106957];
 const ERA_COUNT: u64 = 3;
 const ERA_DURATION: u64 = 30000; //milliseconds
 const MIN_HEIGHT: u64 = 10;
@@ -1991,7 +1992,7 @@ async fn run_rewards_network_scenario(
                     let proposer = block.proposer().clone();
                     add_to_rewards(
                         proposer.clone(),
-                        block_reward,
+                        block_reward.trunc(),
                         &mut recomputed_era_rewards,
                         i,
                         &mut recomputed_total_supply,
@@ -2014,30 +2015,33 @@ async fn run_rewards_network_scenario(
                                         .collect::<BTreeSet<PublicKey>>(),
                                 );
                                 rewarded_contributors.iter().for_each(|contributor| {
-                                    let contributor_proportion = Ratio::from(
+                                    let contributor_proportion = Ratio::new(
                                         previous_era_slated_weights
                                             .as_ref()
                                             .expect("expected previous era weights")
                                             .get(contributor)
                                             .expect("expected current era validator")
                                             .as_u64(),
-                                    ) / total_previous_era_weights
-                                        .expect("expected total previous era weight");
+                                        total_previous_era_weights
+                                            .expect("expected total previous era weight"),
+                                    );
                                     add_to_rewards(
                                         proposer.clone(),
-                                        fixture.chainspec.core_config.finders_fee
+                                        (fixture.chainspec.core_config.finders_fee
                                             * contributor_proportion
-                                            * previous_signatures_reward.unwrap(),
+                                            * previous_signatures_reward.unwrap())
+                                        .trunc(),
                                         &mut recomputed_era_rewards,
                                         i,
                                         &mut recomputed_total_supply,
                                     );
                                     add_to_rewards(
                                         contributor.clone(),
-                                        (Ratio::new(1, 1)
+                                        ((Ratio::new(1, 1)
                                             - fixture.chainspec.core_config.finders_fee)
                                             * contributor_proportion
-                                            * previous_signatures_reward.unwrap(),
+                                            * previous_signatures_reward.unwrap())
+                                        .trunc(),
                                         &mut recomputed_era_rewards,
                                         i,
                                         &mut recomputed_total_supply,
@@ -2051,27 +2055,30 @@ async fn run_rewards_network_scenario(
                                         .collect::<BTreeSet<PublicKey>>(),
                                 );
                                 rewarded_contributors.iter().for_each(|contributor| {
-                                    let contributor_proportion = Ratio::from(
+                                    let contributor_proportion = Ratio::new(
                                         current_era_slated_weights
                                             .get(contributor)
                                             .expect("expected current era validator")
                                             .as_u64(),
-                                    ) / total_current_era_weights;
+                                        total_current_era_weights,
+                                    );
                                     add_to_rewards(
                                         proposer.clone(),
-                                        fixture.chainspec.core_config.finders_fee
+                                        (fixture.chainspec.core_config.finders_fee
                                             * contributor_proportion
-                                            * signatures_reward,
+                                            * signatures_reward)
+                                            .trunc(),
                                         &mut recomputed_era_rewards,
                                         i,
                                         &mut recomputed_total_supply,
                                     );
                                     add_to_rewards(
                                         contributor.clone(),
-                                        (Ratio::new(1, 1)
+                                        ((Ratio::new(1, 1)
                                             - fixture.chainspec.core_config.finders_fee)
                                             * contributor_proportion
-                                            * signatures_reward,
+                                            * signatures_reward)
+                                            .trunc(),
                                         &mut recomputed_era_rewards,
                                         i,
                                         &mut recomputed_total_supply,
@@ -2093,7 +2100,9 @@ async fn run_rewards_network_scenario(
                 Ratio::<u64>::from(total_supply[header.height() as usize].as_u64()),
                 *(recomputed_total_supply
                     .get(&(header.era_id().value() as usize))
-                    .expect("expected recalculated supply"))
+                    .expect("expected recalculated supply")),
+                "total supply does not match at height {}",
+                header.height()
             )
         } else {
         }
@@ -2122,7 +2131,9 @@ async fn run_rewards_network_scenario(
                 rewards.iter().fold(Ratio::from(0u64), |acc, x| x.1 + acc);
             assert_eq!(
                 Ratio::<u64>::from(recomputed_total_rewards),
-                Ratio::<u64>::from(observed_total_rewards)
+                Ratio::<u64>::from(observed_total_rewards),
+                "total rewards do not match at era {}",
+                era
             );
             assert_eq!(
                 Ratio::<u64>::from(recomputed_total_rewards),
@@ -2131,10 +2142,60 @@ async fn run_rewards_network_scenario(
                     .expect("expected recalculated supply")
                     - recomputed_total_supply
                         .get(&(era - &1))
-                        .expect("expected recalculated supply")
+                        .expect("expected recalculated supply"),
+                "supply growth does not match rewards at era {}",
+                era
             )
         }
     })
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_all_finality_small_prime_five_eras() {
+    run_rewards_network_scenario(
+        PRIME_STAKES,
+        5,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        &[],
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_ZERO.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: FINALITY_SIG_LOOKBACK,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
+async fn run_reward_network_zug_all_finality_small_prime_five_eras_no_lookback() {
+    run_rewards_network_scenario(
+        PRIME_STAKES,
+        5,
+        TIME_OUT,
+        REPRESENTATIVE_NODE_INDEX,
+        &[],
+        ChainspecOverride {
+            consensus_protocol: CONSENSUS_ZUG,
+            era_duration: TimeDiff::from_millis(ERA_DURATION),
+            minimum_era_height: MIN_HEIGHT,
+            minimum_block_time: TimeDiff::from_millis(BLOCK_TIME),
+            round_seigniorage_rate: SEIGNIORAGE.into(),
+            finders_fee: FINDERS_FEE_ZERO.into(),
+            finality_signature_proportion: FINALITY_SIG_PROP_ONE.into(),
+            signature_rewards_max_delay: 0,
+            ..Default::default()
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
