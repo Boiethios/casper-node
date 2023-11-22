@@ -1784,10 +1784,11 @@ const FINDERS_FEE_HALF: (u64, u64) = (1u64, 2u64);
 const FINALITY_SIG_PROP_ZERO: (u64, u64) = (0u64, 1u64);
 const FINALITY_SIG_PROP_HALF: (u64, u64) = (1u64, 2u64);
 const FINALITY_SIG_PROP_ONE: (u64, u64) = (1u64, 1u64);
-const FILTERED_NODES_INDICES: &'static [usize] = &[3, 4];
+const FILTERED_NODES_INDICES: &[usize] = &[3, 4];
 const FINALITY_SIG_LOOKBACK: u64 = 3;
 
 #[rustfmt::skip]
+#[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_rewards_network_scenario(
     initial_stakes: impl Into<Vec<u128>>,
     era_count: u64,
