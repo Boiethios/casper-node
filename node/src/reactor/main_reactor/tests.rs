@@ -2,8 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     convert::TryFrom,
     iter,
-    net::SocketAddr,
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -52,7 +50,7 @@ use crate::{
     reactor::Reactor,
     reactor::{
         main_reactor::{Config, MainEvent, MainReactor, ReactorState},
-        Runner,
+        Reactor, Runner,
     },
     testing::{
         self, filter_reactor::FilterReactor, network::TestingNetwork, ConditionCheckReactor,
@@ -1763,6 +1761,8 @@ async fn rewards_are_calculated() {
     }
 }
 
+// Reactor pattern tests for simplified rewards
+
 // Fundamental network parameters that are not critical for assessing reward calculation correctness
 const VALIDATOR_SLOTS: u32 = 10;
 const NETWORK_SIZE: u64 = 10;
@@ -1772,7 +1772,7 @@ const ERA_COUNT: u64 = 3;
 const ERA_DURATION: u64 = 30000; //milliseconds
 const MIN_HEIGHT: u64 = 10;
 const BLOCK_TIME: u64 = 3000; //milliseconds
-const TIME_OUT: u64 = 3000; //seconds
+const TIME_OUT: u64 = 600; //seconds
 const SEIGNIORAGE: (u64, u64) = (1u64, 100u64);
 const REPRESENTATIVE_NODE_INDEX: usize = 0;
 // Parameters we generally want to vary
@@ -1780,13 +1780,14 @@ const CONSENSUS_ZUG: ConsensusProtocolName = ConsensusProtocolName::Zug;
 const CONSENSUS_HIGHWAY: ConsensusProtocolName = ConsensusProtocolName::Highway;
 const FINDERS_FEE_ZERO: (u64, u64) = (0u64, 1u64);
 const FINDERS_FEE_HALF: (u64, u64) = (1u64, 2u64);
-const FINDERS_FEE_ONE: (u64, u64) = (1u64, 1u64);
+//const FINDERS_FEE_ONE: (u64, u64) = (1u64, 1u64);
 const FINALITY_SIG_PROP_ZERO: (u64, u64) = (0u64, 1u64);
 const FINALITY_SIG_PROP_HALF: (u64, u64) = (1u64, 2u64);
 const FINALITY_SIG_PROP_ONE: (u64, u64) = (1u64, 1u64);
 const FILTERED_NODES_INDICES: &'static [usize] = &[3, 4];
 const FINALITY_SIG_LOOKBACK: u64 = 3;
 
+#[rustfmt::skip]
 async fn run_rewards_network_scenario(
     initial_stakes: impl Into<Vec<u128>>,
     era_count: u64,
@@ -1894,28 +1895,12 @@ async fn run_rewards_network_scenario(
 
     // Tiny helper function
     #[inline]
-    fn add_to_rewards(
-        recipient: PublicKey,
-        reward: Ratio<u64>,
-        rewards: &mut BTreeMap<PublicKey, Ratio<u64>>,
-        era: usize,
-        total_supply: &mut BTreeMap<usize, Ratio<u64>>,
-    ) {
-        match (
-            rewards.get_mut(&recipient.clone()),
-            total_supply.get_mut(&era),
-        ) {
-            (Some(value), Some(supply)) => {
+    fn add_to_rewards(recipient: PublicKey, reward: Ratio<u64>, rewards: &mut BTreeMap<PublicKey, Ratio<u64>>) {
+        match rewards.get_mut(&recipient.clone()) {
+            Some(value) => {
                 *value += reward;
-                *supply += reward;
             }
-            (None, Some(supply)) => {
-                rewards.insert(recipient.clone(), reward);
-                *supply += reward;
-            }
-            (Some(_), None) => panic!("rewards present without corresponding supply increase"),
-            (None, None) => {
-                total_supply.insert(era, reward);
+            None => {
                 rewards.insert(recipient.clone(), reward);
             }
         }
@@ -1987,111 +1972,62 @@ async fn run_rewards_network_scenario(
                     )
                 };
 
-                rewarded_blocks.iter().for_each(|block: &Block| {
-                    // Block production rewards
-                    let proposer = block.proposer().clone();
-                    add_to_rewards(
-                        proposer.clone(),
-                        block_reward.trunc(),
-                        &mut recomputed_era_rewards,
-                        i,
-                        &mut recomputed_total_supply,
+                rewarded_blocks
+                    .iter()
+                    .for_each(|block: &Block| {
+                        // Block production rewards
+                        let proposer = block.proposer().clone();
+                        add_to_rewards(proposer.clone(), block_reward, &mut recomputed_era_rewards);
+
+                        // Recover relevant finality signatures
+                        // TODO: Deal with the implicit assumption that lookback only look backs one previous era
+                        block.rewarded_signatures()
+                            .iter()
+                            .enumerate()
+                            .for_each(|(offset, signatures_packed)| {
+                                if block.height() as usize - offset - 1 <= previous_switch_block_height as usize && !switch_blocks.headers[i - 1].is_genesis() {
+                                    let rewarded_contributors = signatures_packed.to_validator_set(previous_era_slated_weights.as_ref().expect("expected previous era weights").keys().cloned().collect::<BTreeSet<PublicKey>>());
+                                    rewarded_contributors
+                                        .iter()
+                                        .for_each(|contributor| {
+                                            let contributor_proportion = Ratio::new(previous_era_slated_weights.as_ref().expect("expected previous era weights")
+                                                .get(contributor)
+                                                .expect("expected current era validator").as_u64(),
+                                                total_previous_era_weights.expect("expected total previous era weight"));
+                                            add_to_rewards(proposer.clone(), fixture.chainspec.core_config.finders_fee * contributor_proportion * previous_signatures_reward.unwrap(), &mut recomputed_era_rewards);
+                                            add_to_rewards(contributor.clone(), (Ratio::new(1, 1) - fixture.chainspec.core_config.finders_fee) * contributor_proportion * previous_signatures_reward.unwrap(), &mut recomputed_era_rewards)
+                                        });
+                                } else {
+                                    let rewarded_contributors = signatures_packed.to_validator_set(current_era_slated_weights.keys().map(|key| key.clone()).collect::<BTreeSet<PublicKey>>());
+                                    rewarded_contributors
+                                        .iter()
+                                        .for_each(|contributor| {
+                                            let contributor_proportion = Ratio::new(current_era_slated_weights
+                                                .get(contributor)
+                                                .expect("expected current era validator").as_u64(),
+                                                total_current_era_weights);
+                                            add_to_rewards(proposer.clone(), fixture.chainspec.core_config.finders_fee * contributor_proportion * signatures_reward, &mut recomputed_era_rewards);
+                                            add_to_rewards(contributor.clone(), (Ratio::new(1, 1) - fixture.chainspec.core_config.finders_fee) * contributor_proportion * signatures_reward, &mut recomputed_era_rewards);
+                                        });
+                                }
+                            });
+                    });
+
+                // Make sure we round just as we do in the real code, at the end of an era's calculation, right before minting and transferring
+                recomputed_era_rewards
+                    .iter_mut()
+                    .for_each(|(_, reward)| {
+                        let truncated_reward = reward.trunc();
+                        *reward = truncated_reward;
+                        let era_end_supply = recomputed_total_supply.get_mut(&i).expect("expected supply at end of era");
+                        *era_end_supply += truncated_reward;
+                        }
                     );
 
-                    // Recover relevant finality signatures
-                    // TODO: Deal with the implicit assumption that lookback only look backs one previous era
-                    block.rewarded_signatures().iter().enumerate().for_each(
-                        |(offset, signatures_packed)| {
-                            if block.height() as usize - offset - 1
-                                <= previous_switch_block_height as usize
-                                && !switch_blocks.headers[i - 1].is_genesis()
-                            {
-                                let rewarded_contributors = signatures_packed.to_validator_set(
-                                    previous_era_slated_weights
-                                        .as_ref()
-                                        .expect("expected previous era weights")
-                                        .keys()
-                                        .cloned()
-                                        .collect::<BTreeSet<PublicKey>>(),
-                                );
-                                rewarded_contributors.iter().for_each(|contributor| {
-                                    let contributor_proportion = Ratio::new(
-                                        previous_era_slated_weights
-                                            .as_ref()
-                                            .expect("expected previous era weights")
-                                            .get(contributor)
-                                            .expect("expected current era validator")
-                                            .as_u64(),
-                                        total_previous_era_weights
-                                            .expect("expected total previous era weight"),
-                                    );
-                                    add_to_rewards(
-                                        proposer.clone(),
-                                        (fixture.chainspec.core_config.finders_fee
-                                            * contributor_proportion
-                                            * previous_signatures_reward.unwrap())
-                                        .trunc(),
-                                        &mut recomputed_era_rewards,
-                                        i,
-                                        &mut recomputed_total_supply,
-                                    );
-                                    add_to_rewards(
-                                        contributor.clone(),
-                                        ((Ratio::new(1, 1)
-                                            - fixture.chainspec.core_config.finders_fee)
-                                            * contributor_proportion
-                                            * previous_signatures_reward.unwrap())
-                                        .trunc(),
-                                        &mut recomputed_era_rewards,
-                                        i,
-                                        &mut recomputed_total_supply,
-                                    )
-                                });
-                            } else {
-                                let rewarded_contributors = signatures_packed.to_validator_set(
-                                    current_era_slated_weights
-                                        .keys()
-                                        .map(|key| key.clone())
-                                        .collect::<BTreeSet<PublicKey>>(),
-                                );
-                                rewarded_contributors.iter().for_each(|contributor| {
-                                    let contributor_proportion = Ratio::new(
-                                        current_era_slated_weights
-                                            .get(contributor)
-                                            .expect("expected current era validator")
-                                            .as_u64(),
-                                        total_current_era_weights,
-                                    );
-                                    add_to_rewards(
-                                        proposer.clone(),
-                                        (fixture.chainspec.core_config.finders_fee
-                                            * contributor_proportion
-                                            * signatures_reward)
-                                            .trunc(),
-                                        &mut recomputed_era_rewards,
-                                        i,
-                                        &mut recomputed_total_supply,
-                                    );
-                                    add_to_rewards(
-                                        contributor.clone(),
-                                        ((Ratio::new(1, 1)
-                                            - fixture.chainspec.core_config.finders_fee)
-                                            * contributor_proportion
-                                            * signatures_reward)
-                                            .trunc(),
-                                        &mut recomputed_era_rewards,
-                                        i,
-                                        &mut recomputed_total_supply,
-                                    );
-                                });
-                            }
-                        },
-                    );
-                });
-                return (i, recomputed_era_rewards);
+                return (i, recomputed_era_rewards)
             }
-        })
-        .collect::<BTreeMap<usize, BTreeMap<PublicKey, Ratio<u64>>>>();
+    })
+        .collect::<BTreeMap<usize,BTreeMap<PublicKey, Ratio<u64>>>>();
 
     // Recalculated total supply is equal to observed total supply
     switch_blocks.headers.iter().for_each(|header| {
@@ -2153,6 +2089,7 @@ async fn run_rewards_network_scenario(
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_small_prime_five_eras() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         PRIME_STAKES,
         5,
@@ -2177,6 +2114,7 @@ async fn run_reward_network_zug_all_finality_small_prime_five_eras() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_small_prime_five_eras_no_lookback() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         PRIME_STAKES,
         5,
@@ -2201,6 +2139,7 @@ async fn run_reward_network_zug_all_finality_small_prime_five_eras_no_lookback()
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_no_finality_small_nominal_five_eras() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [STAKE, STAKE, STAKE, STAKE, STAKE],
         5,
@@ -2225,6 +2164,7 @@ async fn run_reward_network_zug_no_finality_small_nominal_five_eras() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_eras() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [STAKE, STAKE, STAKE, STAKE, STAKE],
         5,
@@ -2249,6 +2189,7 @@ async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_er
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_eras_no_lookback() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [STAKE, STAKE, STAKE, STAKE, STAKE],
         5,
@@ -2273,6 +2214,7 @@ async fn run_reward_network_zug_half_finality_half_finders_small_nominal_five_er
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_half_finders_small_nominal_five_eras_no_lookback() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [STAKE, STAKE, STAKE, STAKE, STAKE],
         5,
@@ -2297,6 +2239,7 @@ async fn run_reward_network_zug_all_finality_half_finders_small_nominal_five_era
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_half_finders() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
@@ -2323,6 +2266,7 @@ async fn run_reward_network_zug_all_finality_half_finders() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_half_finders_five_eras() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
@@ -2349,6 +2293,7 @@ async fn run_reward_network_zug_all_finality_half_finders_five_eras() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_zug_all_finality_zero_finders() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
@@ -2375,6 +2320,7 @@ async fn run_reward_network_zug_all_finality_zero_finders() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_highway_all_finality_zero_finders() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
@@ -2401,6 +2347,7 @@ async fn run_reward_network_highway_all_finality_zero_finders() {
 #[tokio::test]
 #[cfg_attr(not(feature = "failpoints"), ignore)]
 async fn run_reward_network_highway_no_finality() {
+    #[rustfmt::skip]
     run_rewards_network_scenario(
         [
             STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE, STAKE,
