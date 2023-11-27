@@ -2,6 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     convert::TryFrom,
     iter,
+    net::SocketAddr,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -47,7 +49,6 @@ use crate::{
     },
     failpoints::FailpointActivation,
     protocol::Message,
-    reactor::Reactor,
     reactor::{
         main_reactor::{Config, MainEvent, MainReactor, ReactorState},
         Reactor, Runner,
@@ -1764,8 +1765,6 @@ async fn rewards_are_calculated() {
 // Reactor pattern tests for simplified rewards
 
 // Fundamental network parameters that are not critical for assessing reward calculation correctness
-const VALIDATOR_SLOTS: u32 = 10;
-const NETWORK_SIZE: u64 = 10;
 const STAKE: u128 = 1000000000;
 const PRIME_STAKES: [u128; 5] = [106907, 106921, 106937, 106949, 106957];
 const ERA_COUNT: u64 = 3;
@@ -1798,7 +1797,6 @@ async fn run_rewards_network_scenario(
     spec_override: ChainspecOverride,
 ) {
     use casper_execution_engine::engine_state::{Error, QueryResult::*};
-    use std::cmp::max;
 
     let initial_stakes = initial_stakes.into();
 
